@@ -32,7 +32,7 @@ A Python application that automates the retrieval and analysis of work timesheet
 	- `python main.py`
 2. On first run, you'll be prompted to enter your ID number
 3. The script will:
-	-Log in to SDMataClick.com
+  	- Log in to SDMataClick.com
 	- Retrieve your timesheet data
 	- Analyze your work hours
 	- Generate an HTML report
