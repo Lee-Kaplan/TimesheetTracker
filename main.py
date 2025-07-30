@@ -817,7 +817,7 @@ def generate_html_report(results, user_name=None):
         
     html += f"""
     <div class="footer">
-        Report generated on {current_date} | Written and designed by Lee Kaplan (and ChatGPT) | V1.3 with Clockify Task Details
+        Report generated on {current_date} | Written and designed by Lee Kaplan (and ChatGPT) | V1.3
     </div>
     </body>
     </html>
