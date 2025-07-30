@@ -1,43 +1,171 @@
 import os
 from bs4 import BeautifulSoup
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
-import time
 import webbrowser
 import json
 import logging
+import requests
 from selenium.webdriver.remote.remote_connection import LOGGER
 
 # Configure logging
 LOGGER.setLevel(logging.WARNING)
 logging.basicConfig(level=logging.WARNING)
 
-def get_id_number():
+def get_config_values():
     config_file = 'timesheet_config.json'
+    config = {}
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r') as f:
                 config = json.load(f)
-                if 'id_number' in config:
-                    return config['id_number']
         except Exception as e:
             print(f"Error reading config: {e}")
     
-    while True:
-        id_number = input("Please enter your ID number: ").strip()
-        if id_number:
-            try:
-                with open(config_file, 'w') as f:
-                    json.dump({'id_number': id_number}, f)
-                return id_number
-            except Exception as e:
-                print(f"Warning: Could not save ID number ({e}), continuing without saving")
-                return id_number
+    # Get ID number
+    if 'id_number' not in config:
+        config['id_number'] = input("Please enter your ID number: ").strip()
+    
+    # Get Clockify API Key if not present
+    if 'clockify_api_key' not in config:
+        config['clockify_api_key'] = input("Please enter your Clockify API Key: ").strip()
+    
+    # Get Clockify Workspace ID if not present
+    if 'clockify_workspace_id' not in config:
+        config['clockify_workspace_id'] = input("Please enter your Clockify Workspace ID: ").strip()
+    
+    # Save the config
+    try:
+        with open(config_file, 'w') as f:
+            json.dump(config, f)
+    except Exception as e:
+        print(f"Warning: Could not save config ({e}), continuing without saving")
+    
+    return config
+
+def get_clockify_data(api_key, workspace_id, user_id=None):
+    base_url = "https://api.clockify.me/api/v1"
+    headers = {
+        "X-Api-Key": api_key,
+        "Content-Type": "application/json"
+    }
+    
+    # If user_id is not provided, get it from the current user endpoint
+    if not user_id:
+        try:
+            user_response = requests.get(f"{base_url}/user", headers=headers)
+            user_response.raise_for_status()
+            user_id = user_response.json()["id"]
+        except Exception as e:
+            print(f"Error getting user ID from Clockify: {e}")
+            return None
+    
+    # Get time entries for the last 30 days
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
+    
+    params = {
+        "start": start_date.isoformat() + "Z",
+        "end": end_date.isoformat() + "Z",
+        "page-size": 1000
+    }
+    
+    try:
+        entries_response = requests.get(
+            f"{base_url}/workspaces/{workspace_id}/user/{user_id}/time-entries",
+            headers=headers,
+            params=params
+        )
+        entries_response.raise_for_status()
+        entries = entries_response.json()
+        
+        # Process entries into a DataFrame
+        data = []
+        for entry in entries:
+            if entry['timeInterval']['duration']:
+                start = datetime.fromisoformat(entry['timeInterval']['start'][:-1])
+                duration = entry['timeInterval']['duration']
+                
+                # Parse ISO 8601 duration
+                hours = 0
+                if 'H' in duration:
+                    hours_part = duration.split('H')[0]
+                    if 'T' in hours_part:
+                        hours = float(hours_part.split('T')[-1])
+                    else:
+                        hours = float(hours_part)
+                
+                # Handle case where duration is just minutes (PT48M)
+                if 'M' in duration and 'H' not in duration:
+                    minutes_part = duration.split('M')[0]
+                    if 'T' in minutes_part:
+                        minutes = float(minutes_part.split('T')[-1])
+                    else:
+                        minutes = float(minutes_part)
+                    hours = minutes / 60
+                elif 'M' in duration:  # Case where both H and M are present (PT8H30M)
+                    minutes_part = duration.split('M')[0].split('H')[-1]
+                    minutes = float(minutes_part) if minutes_part else 0
+                    hours += minutes / 60
+                
+                # Get project name if available
+                project_name = "No project"
+                if 'project' in entry and entry['project']:
+                    try:
+                        project_response = requests.get(
+                            f"{base_url}/workspaces/{workspace_id}/projects/{entry['project']['id']}",
+                            headers=headers
+                        )
+                        project_response.raise_for_status()
+                        project_name = project_response.json()['name']
+                    except:
+                        project_name = entry['project']['name'] if 'name' in entry['project'] else "No project"
+                
+                # Get task name if available
+                task_name = "No task"
+                if 'task' in entry and entry['task']:
+                    try:
+                        task_response = requests.get(
+                            f"{base_url}/workspaces/{workspace_id}/projects/{entry['project']['id']}/tasks/{entry['task']['id']}",
+                            headers=headers
+                        )
+                        task_response.raise_for_status()
+                        task_name = task_response.json()['name']
+                    except:
+                        task_name = entry['task']['name'] if 'name' in entry['task'] else "No task"
+                
+                data.append({
+                    'Date': start.date(),
+                    'ClockifyHours': hours,
+                    'ClockifyDescription': entry.get('description', ''),
+                    'Project': project_name,
+                    'Task': task_name
+                })
+        
+        if data:
+            df = pd.DataFrame(data)
+            df['Date'] = pd.to_datetime(df['Date'])
+            
+            # Group by date and collect all tasks/projects/descriptions
+            grouped = df.groupby('Date').agg({
+                'ClockifyHours': 'sum',
+                'ClockifyDescription': lambda x: list(x),
+                'Project': lambda x: list(x),
+                'Task': lambda x: list(x)
+            }).reset_index()
+            
+            return grouped
+            
+        return None
+        
+    except Exception as e:
+        print(f"Error getting time entries from Clockify: {e}")
+        return None   
 
 def configure_selenium_driver():
     options = webdriver.ChromeOptions()
@@ -149,6 +277,7 @@ def parse_timesheet(html_content):
 def format_hours_minutes(hours, sign=None):
     if pd.isna(hours):
         return ""
+    
     total_minutes = int(round(hours * 60))
     h, m = divmod(total_minutes, 60)
     
@@ -163,36 +292,41 @@ def format_hours_minutes(hours, sign=None):
     else:
         return f"{prefix}{h}h {m:02d}min"
 
-def calculate_work_duration(row):
-    if pd.isna(row['FirstIn']) or pd.isna(row['LastOut']):
-        return 0
-    try:
-        start = datetime.strptime(row['FirstIn'], '%H:%M')
-        end = datetime.strptime(row['LastOut'], '%H:%M')
-        return (end - start).total_seconds() / 3600
-    except:
-        return 0
-
-def analyze_timesheet(df, daily_target=9):
+def analyze_timesheet(df, daily_target=9, clockify_df=None):
     results = {}
     results['daily_target'] = daily_target
     
     # Filter out weekends (Saturday=5, Sunday=6) and days with 0 hours
     df = df[(df['Date'].dt.dayofweek < 5) & (df['Hours'] > 0)]
     
+    # Merge with Clockify data if available
+    if clockify_df is not None:
+        df = pd.merge(df, clockify_df, on='Date', how='left')
+        df['ClockifyHours'] = df['ClockifyHours'].fillna(0)
+    
     daily = df.groupby('Date').agg({
         'FirstIn': 'first',
         'LastOut': 'last',
-        'Hours': 'sum'
+        'Hours': 'sum',
+        'ClockifyHours': 'first',
+        'ClockifyDescription': 'first',
+        'Project': 'first',
+        'Task': 'first'
     }).reset_index()
 
     daily['DayOfWeek'] = daily['Date'].dt.day_name()
     daily['OnTrack'] = daily['Hours'].apply(lambda x: "✅" if x >= daily_target else "❌")
     daily['Difference'] = daily['Hours'] - daily_target
-    daily['WorkDuration'] = daily.apply(calculate_work_duration, axis=1)
     
     daily['HoursFormatted'] = daily['Hours'].apply(format_hours_minutes)
+    daily['ClockifyHoursFormatted'] = daily['ClockifyHours'].apply(format_hours_minutes)
     daily['DifferenceFormatted'] = daily['Difference'].apply(lambda x: format_hours_minutes(abs(x), sign=x))
+    
+    # Create tooltip content but don't store it in the dataframe
+    results['_clockify_tooltips'] = {
+        str(row['Date'].date()): create_clockify_tooltip(row['ClockifyDescription'], row['Project'], row['Task'])
+        for _, row in daily.iterrows() if pd.notna(row['ClockifyHours']) and row['ClockifyHours'] > 0
+    }
     
     results['daily'] = daily
 
@@ -200,6 +334,7 @@ def analyze_timesheet(df, daily_target=9):
         daily['Week'] = daily['Date'].dt.isocalendar().week
         weekly = daily.groupby('Week').agg({
             'Hours': 'sum',
+            'ClockifyHours': 'sum',
             'Date': 'nunique',
             'OnTrack': lambda x: (x == "✅").sum()
         }).rename(columns={'Date': 'WorkDays', 'OnTrack': 'OnTargetDays'})
@@ -210,6 +345,7 @@ def analyze_timesheet(df, daily_target=9):
         weekly['OnTargetPercentage'] = (weekly['OnTargetDays'] / weekly['WorkDays']) * 100
         
         weekly['HoursFormatted'] = weekly['Hours'].apply(format_hours_minutes)
+        weekly['ClockifyHoursFormatted'] = weekly['ClockifyHours'].apply(format_hours_minutes)
         weekly['TargetHoursFormatted'] = weekly['TargetHours'].apply(format_hours_minutes)
         weekly['WeeklyDifferenceFormatted'] = weekly['WeeklyDifference'].apply(lambda x: format_hours_minutes(abs(x), sign=x))
         weekly['AvgDailyHoursFormatted'] = weekly['AvgDailyHours'].apply(format_hours_minutes)
@@ -217,6 +353,22 @@ def analyze_timesheet(df, daily_target=9):
         results['weekly'] = weekly
     
     return results
+
+def create_clockify_tooltip(descriptions, projects, tasks):
+    if not isinstance(descriptions, list):
+        return ""
+    
+    tooltip_content = []
+    for desc, proj, task in zip(descriptions, projects, tasks):
+        entry = []
+        if desc:
+            entry.append(f"{desc}")
+        if entry:
+            tooltip_content.append("<li>" + "<br>".join(entry) + "</li>")
+    
+    if tooltip_content:
+        return "<ul>" + "".join(tooltip_content) + "</ul>"
+    return "No details available"
 
 def generate_html_report(results, user_name=None):
     title = "WORK TIMESHEET ANALYSIS"
@@ -229,6 +381,7 @@ def generate_html_report(results, user_name=None):
     daily_chart_data = {
         'labels': results['daily']['Date'].dt.strftime('%Y-%m-%d').tolist(),
         'hours': results['daily']['Hours'].tolist(),
+        'clockify_hours': results['daily']['ClockifyHours'].tolist(),
         'differences': results['daily']['Difference'].tolist(),
         'target': [daily_target] * len(results['daily'])
     }
@@ -236,6 +389,7 @@ def generate_html_report(results, user_name=None):
     weekly_chart_data = {
         'labels': [f"Week {week}" for week in results['weekly'].index.tolist()],
         'hours': results['weekly']['Hours'].tolist(),
+        'clockify_hours': results['weekly']['ClockifyHours'].tolist(),
         'targets': results['weekly']['TargetHours'].tolist(),
         'diffs': results['weekly']['WeeklyDifference'].tolist()
     }
@@ -321,6 +475,48 @@ def generate_html_report(results, user_name=None):
             .hours-cell {{
                 font-family: monospace;
             }}
+            .tooltip {{
+                position: relative;
+                display: inline-block;
+                cursor: pointer;
+            }}
+            .tooltip .tooltiptext {{
+                visibility: hidden;
+                width: 300px;
+                background-color: #555;
+                color: #fff;
+                text-align: left;
+                border-radius: 6px;
+                padding: 10px;
+                position: absolute;
+                z-index: 1;
+                bottom: 125%;
+                left: 50%;
+                margin-left: -150px;
+                opacity: 0;
+                transition: opacity 0.3s;
+            }}
+            .tooltip .tooltiptext::after {{
+                content: "";
+                position: absolute;
+                top: 100%;
+                left: 50%;
+                margin-left: -5px;
+                border-width: 5px;
+                border-style: solid;
+                border-color: #555 transparent transparent transparent;
+            }}
+            .tooltip:hover .tooltiptext {{
+                visibility: visible;
+                opacity: 1;
+            }}
+            .tooltip-content ul {{
+                margin: 0;
+                padding-left: 20px;
+            }}
+            .tooltip-content li {{
+                margin-bottom: 8px;
+            }}
         </style>
     </head>
     <body>
@@ -342,15 +538,22 @@ def generate_html_report(results, user_name=None):
         </div>
         """
         
-        daily_df = results['daily'][['Date', 'DayOfWeek', 'FirstIn', 'LastOut', 'HoursFormatted', 'OnTrack', 'DifferenceFormatted']]
+        daily_df = results['daily'][['Date', 'DayOfWeek', 'FirstIn', 'LastOut', 'HoursFormatted', 'ClockifyHoursFormatted', 'OnTrack', 'DifferenceFormatted']]
         daily_df = daily_df.rename(columns={
             'DayOfWeek': 'Day of Week',
             'FirstIn': 'Arrival Time',
             'LastOut': 'Leaving Time',
-            'HoursFormatted': 'Hours',
+            'HoursFormatted': 'Hours Clocked In',
+            'ClockifyHoursFormatted': 'Clockify Hours',
             'OnTrack': 'Hours Met?',
             'DifferenceFormatted': 'Difference'
         })
+        
+        # Format Clockify Hours with tooltip from the results dict
+        daily_df['Clockify Hours'] = daily_df.apply(
+            lambda row: f'<div class="tooltip">{row["Clockify Hours"]}<span class="tooltiptext tooltip-content">{results["_clockify_tooltips"].get(str(row["Date"].date()), "")}</span></div>' 
+            if str(row["Date"].date()) in results["_clockify_tooltips"] else row["Clockify Hours"], axis=1)
+        
         daily_df['Date'] = daily_df['Date'].dt.strftime('%Y-%m-%d')
         daily_df['Difference'] = daily_df['Difference'].apply(lambda x: f'<span class="{"positive" if x.startswith("+") else "negative"}">{x}</span>')
         # Sort by date descending (most recent first)
@@ -367,10 +570,17 @@ def generate_html_report(results, user_name=None):
                     labels: {daily_chart_data['labels']},
                     datasets: [
                         {{
-                            label: 'Hours Worked',
+                            label: 'Hours Clocked In',
                             data: {daily_chart_data['hours']},
                             backgroundColor: 'rgba(54, 162, 235, 0.7)',
                             borderColor: 'rgba(54, 162, 235, 1)',
+                            borderWidth: 1
+                        }},
+                        {{
+                            label: 'Clockify Hours',
+                            data: {daily_chart_data['clockify_hours']},
+                            backgroundColor: 'rgba(153, 102, 255, 0.7)',
+                            borderColor: 'rgba(153, 102, 255, 1)',
                             borderWidth: 1
                         }},
                         {{
@@ -478,11 +688,12 @@ def generate_html_report(results, user_name=None):
         """
         
         weekly_df = results['weekly'][['WorkDays', 'OnTargetDays', 'OnTargetPercentage', 'TargetHoursFormatted', 'HoursFormatted', 
-                                    'AvgDailyHoursFormatted', 'WeeklyDifferenceFormatted']]
+                                    'ClockifyHoursFormatted', 'AvgDailyHoursFormatted', 'WeeklyDifferenceFormatted']]
         weekly_df = weekly_df.rename(columns={
             'WorkDays': 'Days',
             'OnTargetDays': 'Met Target',
-            'HoursFormatted': 'Hours',
+            'HoursFormatted': 'Hours Clocked In',
+            'ClockifyHoursFormatted': 'Clockify Hours',
             'TargetHoursFormatted': 'Target',
             'WeeklyDifferenceFormatted': 'Difference',
             'AvgDailyHoursFormatted': 'Avg/Day',
@@ -504,10 +715,17 @@ def generate_html_report(results, user_name=None):
                     labels: {weekly_chart_data['labels']},
                     datasets: [
                         {{
-                            label: 'Hours Worked',
+                            label: 'Hours Clocked In',
                             data: {weekly_chart_data['hours']},
                             backgroundColor: 'rgba(54, 162, 235, 0.7)',
                             borderColor: 'rgba(54, 162, 235, 1)',
+                            borderWidth: 1
+                        }},
+                        {{
+                            label: 'Clockify Hours',
+                            data: {weekly_chart_data['clockify_hours']},
+                            backgroundColor: 'rgba(153, 102, 255, 0.7)',
+                            borderColor: 'rgba(153, 102, 255, 1)',
                             borderWidth: 1
                         }},
                         {{
@@ -599,7 +817,7 @@ def generate_html_report(results, user_name=None):
         
     html += f"""
     <div class="footer">
-        Report generated on {current_date} | Written and designed by Lee Kaplan (and ChatGPT) | V1.2
+        Report generated on {current_date} | Written and designed by Lee Kaplan (and ChatGPT) | V1.3 with Clockify Task Details
     </div>
     </body>
     </html>
@@ -611,18 +829,21 @@ def main():
     daily_target_hours = 9
     report_filename = 'timesheet_report.html'
     report_path = os.path.abspath(report_filename)          
-    id_number = get_id_number()
+    config = get_config_values()
     
     try:
         print("Logging in and retrieving timesheet...")
-        html_content, user_name = login_and_get_timesheet(id_number)
+        html_content, user_name = login_and_get_timesheet(config['id_number'])
         
         if html_content is None:
             print("Failed to retrieve timesheet data")
             return
         
+        print("Retrieving Clockify data...")
+        clockify_df = get_clockify_data(config['clockify_api_key'], config['clockify_workspace_id'])
+        
         df = parse_timesheet(html_content)
-        analysis_results = analyze_timesheet(df, daily_target_hours)
+        analysis_results = analyze_timesheet(df, daily_target_hours, clockify_df)
         html_report = generate_html_report(analysis_results, user_name)
 
         with open(report_path, 'w', encoding='utf-8') as f:
