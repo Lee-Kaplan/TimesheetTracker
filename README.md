@@ -23,7 +23,7 @@ A Python application that automates the retrieval and analysis of work timesheet
 
 1. Clone this repository or download the files
 2. Install the required packages:
-	- `pip install beautifulsoup4 pandas selenium` (The requirements file doesn't work and I dobn't feel like removing it from the repo)
+	- `pip install beautifulsoup4 pandas selenium`
 
 
 ## Usage
