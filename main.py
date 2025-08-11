@@ -358,17 +358,23 @@ def create_clockify_tooltip(descriptions, projects, tasks):
     if not isinstance(descriptions, list):
         return ""
     
-    tooltip_content = []
+    # Create a set of unique entries to avoid duplicates
+    unique_entries = set()
     for desc, proj, task in zip(descriptions, projects, tasks):
         entry = []
         if desc:
             entry.append(f"{desc}")
+        if proj and proj != "No project":
+            entry.append(f"Project: {proj}")
+        if task and task != "No task":
+            entry.append(f"Task: {task}")
         if entry:
-            tooltip_content.append("<li>" + "<br>".join(entry) + "</li>")
+            unique_entries.add("<li>" + "<br>".join(entry) + "</li>")
     
-    if tooltip_content:
-        return "<ul>" + "".join(tooltip_content) + "</ul>"
+    if unique_entries:
+        return "<ul>" + "".join(unique_entries) + "</ul>"
     return "No details available"
+
 
 def generate_html_report(results, user_name=None):
     title = "WORK TIMESHEET ANALYSIS"
@@ -538,14 +544,13 @@ def generate_html_report(results, user_name=None):
         </div>
         """
         
-        daily_df = results['daily'][['Date', 'DayOfWeek', 'FirstIn', 'LastOut', 'HoursFormatted', 'ClockifyHoursFormatted', 'OnTrack', 'DifferenceFormatted']]
+        daily_df = results['daily'][['Date', 'DayOfWeek', 'FirstIn', 'LastOut', 'HoursFormatted', 'ClockifyHoursFormatted', 'DifferenceFormatted']]
         daily_df = daily_df.rename(columns={
             'DayOfWeek': 'Day of Week',
             'FirstIn': 'Arrival Time',
             'LastOut': 'Leaving Time',
             'HoursFormatted': 'Hours Clocked In',
             'ClockifyHoursFormatted': 'Clockify Hours',
-            'OnTrack': 'Hours Met?',
             'DifferenceFormatted': 'Difference'
         })
         
