@@ -31,13 +31,15 @@ def get_config_values():
     if 'id_number' not in config:
         config['id_number'] = input("Please enter your ID number: ").strip()
     
-    # Get Clockify API Key if not present
+    # Make Clockify details optional
     if 'clockify_api_key' not in config:
-        config['clockify_api_key'] = input("Please enter your Clockify API Key: ").strip()
-    
-    # Get Clockify Workspace ID if not present
-    if 'clockify_workspace_id' not in config:
-        config['clockify_workspace_id'] = input("Please enter your Clockify Workspace ID: ").strip()
+        use_clockify = input("Do you want to use Clockify integration? (y/n): ").strip().lower()
+        if use_clockify == 'y':
+            config['clockify_api_key'] = input("Please enter your Clockify API Key: ").strip()
+            config['clockify_workspace_id'] = input("Please enter your Clockify Workspace ID: ").strip()
+        else:
+            config['clockify_api_key'] = None
+            config['clockify_workspace_id'] = None
     
     # Save the config
     try:
@@ -49,6 +51,9 @@ def get_config_values():
     return config
 
 def get_clockify_data(api_key, workspace_id, user_id=None):
+    if not api_key or not workspace_id:
+        return None
+        
     base_url = "https://api.clockify.me/api/v1"
     headers = {
         "X-Api-Key": api_key,
@@ -299,8 +304,14 @@ def analyze_timesheet(df, daily_target=9, clockify_df=None):
     # Filter out weekends (Saturday=5, Sunday=6) and days with 0 hours
     df = df[(df['Date'].dt.dayofweek < 5) & (df['Hours'] > 0)]
     
-    # Merge with Clockify data if available
-    if clockify_df is not None:
+    # Initialize Clockify columns if not provided
+    if clockify_df is None:
+        df['ClockifyHours'] = 0
+        df['ClockifyDescription'] = None
+        df['Project'] = None
+        df['Task'] = None
+    else:
+        # Merge with Clockify data if available
         df = pd.merge(df, clockify_df, on='Date', how='left')
         df['ClockifyHours'] = df['ClockifyHours'].fillna(0)
     
@@ -844,8 +855,10 @@ def main():
             print("Failed to retrieve timesheet data")
             return
         
-        print("Retrieving Clockify data...")
-        clockify_df = get_clockify_data(config['clockify_api_key'], config['clockify_workspace_id'])
+        clockify_df = None
+        if config.get('clockify_api_key') and config.get('clockify_workspace_id'):
+            print("Retrieving Clockify data...")
+            clockify_df = get_clockify_data(config['clockify_api_key'], config['clockify_workspace_id'])
         
         df = parse_timesheet(html_content)
         analysis_results = analyze_timesheet(df, daily_target_hours, clockify_df)
